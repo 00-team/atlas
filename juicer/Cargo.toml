@@ -1,8 +1,0 @@
-[package]
-name = "juicer"
-version.workspace = true
-edition.workspace = true
-
-[[bin]]
-name = "juicer"
-path = "main.rs"

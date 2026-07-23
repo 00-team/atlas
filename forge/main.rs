@@ -1,7 +1,7 @@
 use geo::algorithm::bounding_rect::BoundingRect;
 use geo::algorithm::centroid::Centroid;
 use geo::algorithm::contains::Contains;
-use geo::{LineString, MultiPolygon, Polygon as GeoPolygon};
+use geo::{HasDimensions, LineString, MultiPolygon, Polygon as GeoPolygon};
 use geo::{Point, Polygon};
 use osmpbfreader::NodeId;
 use osmpbfreader::{OsmId, OsmObj, OsmPbfReader};
@@ -9,98 +9,66 @@ use std::collections::VecDeque;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 
-
-
-type Area = Vec<Vec<Vec<[f64; 2]>>>;
-
-#[derive(serde::Serialize, Clone)]
-struct Sector {
-    level: u8,
-    name: String,
-    area: Area,
-    #[serde(skip)]
-    poly: MultiPolygon<f64>,
-    // regions: Vec<Region>,
-    id: String,
-    parent: String,
-}
-
+use crate::db::SectorDb;
+use crate::error::AtlasError;
 
 // #[derive(serde::Serialize, Clone)]
-// struct Canton {
+// struct Sector {
+//     level: u8,
 //     name: String,
-//     area: Vec<GeoArea>,
-//     id: String,
-// }
-//
-// #[derive(serde::Serialize, Clone)]
-// struct Region {
-//     name: String,
-//     area: Vec<GeoArea>,
-//     // cantons: Vec<Canton>,
-//     id: String,
-// }
-//
-// #[derive(serde::Serialize)]
-// struct Nation {
-//     name: String,
-//     area: Vec<GeoArea>,
+//     area: Area,
+//     #[serde(skip)]
+//     poly: MultiPolygon<f64>,
 //     // regions: Vec<Region>,
 //     id: String,
+//     parent: String,
 // }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SectorDb {
-    index: Vec<String>,
-    nations: HashMap<String, Nation>,
-}
+mod db;
+mod error;
 
-fn main() {
-    let filename = std::env::args().skip(1).next().expect("no filename");
+const DB_PATH: &str = "sector-db.json";
+
+fn main() -> Result<(), AtlasError> {
+    let filename = std::env::args().nth(1).expect("no filename");
     println!("loading: {filename}");
+
+    let mut sdb = SectorDb::load(DB_PATH)?;
 
     // let filename = "data/armenia-latest.osm.pbf";
     let file = File::open(&filename).expect("Failed to open PBF");
     let mut pbf = OsmPbfReader::new(file);
 
-    let en_locale = serde_json::from_str::<HashMap<String, String>>(
-        &std::fs::read_to_string("data/en.json").unwrap(),
-    )
-    .unwrap();
+    let en_locale =
+        serde_json::from_str::<HashMap<String, String>>(&std::fs::read_to_string("data/en.json")?)?;
 
-    let objs = pbf
-        .get_objs_and_deps(|obj| {
-            let tags = obj.tags();
-            let is_admin = tags.get("boundary").map(|s| s.as_str()) == Some("administrative");
-            if !is_admin {
-                return false;
-            }
-            let Some(admin_level) = tags.get("admin_level").map(|s| s.as_str()) else {
-                return false;
-            };
+    let objs = pbf.get_objs_and_deps(|obj| {
+        let tags = obj.tags();
+        let is_admin = tags.get("boundary").map(|s| s.as_str()) == Some("administrative");
+        if !is_admin {
+            return false;
+        }
+        let Some(admin_level) = tags.get("admin_level").map(|s| s.as_str()) else {
+            return false;
+        };
 
-            admin_level == "2" || admin_level == "4" || admin_level == "5"
-            // let is_target_admin =
-            //     is_admin && (admin_level == Some("2") || admin_level == Some("4"));
-            // // let is_city = obj.is_node()
-            // //     && (tags.get("place").map(|s| s.as_str()) == Some("city")
-            // //         || tags.get("place").map(|s| s.as_str()) == Some("town"));
-            //
-            // is_target_admin || is_city
-        })
-        .unwrap();
+        admin_level == "2" || admin_level == "4" || admin_level == "5"
+    })?;
 
     let mut nations = Vec::new();
     let mut regions = Vec::new();
     let mut cantons = Vec::new();
 
-    for (_, obj) in &objs {
+    let mut nations_ids = Vec::new();
+    let mut regions_ids = Vec::new();
+
+    for obj in objs.values() {
         let tags = obj.tags();
         let name = tags.get("name").map(|s| s.to_string()).unwrap_or_default();
         let name_en = tags
             .get("name:en")
             .map(|s| s.to_string())
-            .unwrap_or_else(|| en_locale.get(&name).map(|s| s.clone()).unwrap_or_default());
+            .unwrap_or_else(|| en_locale.get(&name).cloned().unwrap_or_default());
 
         let OsmObj::Relation(rel) = obj else { continue };
 
@@ -112,8 +80,8 @@ fn main() {
             continue;
         }
 
-        let (area, poly) = build_geo_polygons(rel, &objs);
-        if area.is_empty() {
+        let poly = build_geo_polygons(rel, &objs);
+        if poly.is_empty() {
             println!("\x1b[33mwarning\x1b[m no geo for {admin_level:?} {name} | {name_en}");
             continue;
         }
@@ -132,35 +100,33 @@ fn main() {
 
         match admin_level {
             "2" => {
-                nations.push(Sector {
-                    level: 1,
+                nations_ids.push(id.clone());
+                nations.push(db::Nation {
                     name,
-                    area,
                     poly,
-                    // regions: Vec::new(),
                     id,
-                    parent: String::new(),
+                    regions: Default::default(),
+                    index: 0,
+                    regions_index: vec!["<empty>".to_string()],
                 });
             }
             "4" => {
-                regions.push(Sector {
-                    level: 2,
+                regions_ids.push(id.clone());
+                regions.push(db::Region {
                     name,
-                    area,
                     poly,
                     id,
-                    parent: String::new(),
-                    // cantons: Vec::new(),
+                    cantons: Default::default(),
+                    index: 0,
+                    canton_index: vec!["<empty>".to_string()],
                 });
             }
             "5" => {
-                cantons.push(Sector {
-                    level: 3,
+                cantons.push(db::Canton {
                     name,
-                    area,
                     poly,
                     id,
-                    parent: String::new(),
+                    index: 0,
                 });
             }
             _ => unreachable!(),
@@ -172,97 +138,150 @@ fn main() {
     println!("cantons: {}", cantons.len());
 
     if regions.is_empty() && nations.len() == 1 {
-        let mut r = nations[0].clone();
-        r.level = 2;
+        let n = &nations[0];
+        let r = db::Region {
+            index: 0,
+            canton_index: vec!["<empty>".to_string()],
+            poly: n.poly.clone(),
+            cantons: Default::default(),
+            id: n.id.clone(),
+            name: n.name.clone(),
+        };
         regions.push(r);
     }
 
     println!("Assembling hierarchy natively via Point-in-Polygon...");
 
-    let mut sectors = HashMap::<String, Sector>::new();
-
-    for n in &nations {
-        assert!(!n.id.is_empty());
-        sectors.insert(n.id.clone(), n.clone());
+    fn clean_index<T>(index: &mut [String], map: &HashMap<String, T>) {
+        for id in index.iter_mut().skip(1) {
+            if !map.contains_key(id) {
+                id.clear();
+            }
+        }
     }
 
-    for region in regions.iter_mut() {
-        assert!(!region.id.is_empty());
-        let Some(rc) = get_safe_interior_point(&region.poly[0]) else {
-            println!("\x1b[31mERR: {}", region.name);
+    fn get_index(index: &mut Vec<String>, id: &str) -> usize {
+        let mut empty_idx = 0;
+        for (x, old_id) in index.iter().skip(1).enumerate() {
+            if old_id.is_empty() && empty_idx == 0 {
+                empty_idx = x;
+                continue;
+            }
+
+            if old_id == id {
+                return x;
+            }
+        }
+
+        if empty_idx != 0 {
+            index[empty_idx] = id.to_string();
+            return empty_idx;
+        }
+
+        let idx = index.len();
+        index.push(id.to_string());
+        idx
+    }
+
+    clean_index(&mut sdb.index, &sdb.nations);
+
+    for mut n in nations {
+        assert!(!n.id.is_empty());
+        if let Some(old) = sdb.nations.get_mut(&n.id) {
+            println!("nation {} already exists", n.name);
+            old.poly = n.poly;
+            old.regions.clear();
+            continue;
+        }
+
+        n.index = get_index(&mut sdb.index, &n.id);
+        sdb.nations.insert(n.id.clone(), n);
+    }
+
+    for mut r in regions {
+        assert!(!r.id.is_empty());
+        let Some(rc) = get_safe_interior_point(&r.poly[0]) else {
+            println!("\x1b[31mERR: {}", r.name);
             continue;
         };
 
-        let Some(nation) = nations.iter_mut().find(|c| c.poly.contains(&rc)) else {
+        let Some(nation) = sdb.nations.values_mut().find(|n| n.poly.contains(&rc)) else {
             println!(
                 "\x1b[93mWarning\x1b[m: State '{}' center fell completely outside all countries.",
-                region.name
+                r.name
             );
             continue;
         };
 
-        region.parent = nation.id.clone();
-        region.id = format!("{}.{}", nation.id, region.id);
-        if sectors.contains_key(&region.id) {
-            println!("id {} alreay exists", region.id);
-            return;
+        if let Some(old) = nation.regions.get_mut(&r.id) {
+            println!("region {} already exists", r.name);
+            old.poly = r.poly;
+            old.cantons.clear();
+            continue;
         }
-        sectors.insert(region.id.clone(), region.clone());
-        // nation.regions.push(region);
+
+        r.index = get_index(&mut nation.regions_index, &r.id);
+        nation.regions.insert(r.id.clone(), r);
     }
 
-    for canton in cantons.iter_mut() {
-        assert!(!canton.id.is_empty());
-        let Some(cc) = get_safe_interior_point(&canton.poly[0]) else {
-            println!("\x1b[31mERR: {}", canton.name);
+    for mut c in cantons {
+        assert!(!c.id.is_empty());
+        let Some(cc) = get_safe_interior_point(&c.poly[0]) else {
+            println!("\x1b[31mERR: {}", c.name);
             continue;
         };
 
-        let Some(pr) = regions.iter_mut().find(|s| s.poly.contains(&cc)) else {
+        let region = sdb
+            .nations
+            .values_mut()
+            .find_map(|n| n.regions.values_mut().find(|r| r.poly.contains(&cc)));
+
+        let Some(region) = region else {
             println!(
                 "\x1b[93mWarning\x1b[m: County '{}' center fell completely outside all states.",
-                canton.name
+                c.name
             );
             continue;
         };
 
-        canton.id = format!("{}.{}", pr.id, canton.id);
-        canton.parent = pr.id.clone();
-        if sectors.contains_key(&canton.id) {
-            println!("id {} alreay exists", canton.id);
-            return;
+        if let Some(old) = region.cantons.get_mut(&c.id) {
+            println!("canton {} already exists", c.name);
+            old.poly = c.poly;
+            continue;
         }
-        sectors.insert(canton.id.clone(), canton.clone());
-        // pr.cantons.push(canton);
+
+        c.index = get_index(&mut region.canton_index, &c.id);
+        region.cantons.insert(c.id.clone(), c);
     }
 
-    println!("nations: {}", nations.len());
-    println!("regions: {}", regions.len());
-    println!("cantons: {}", cantons.len());
-    println!("sectors: {}", sectors.len());
+    sdb.save(DB_PATH)?;
 
-    let json_output = serde_json::to_string_pretty(&sectors).unwrap();
-    std::fs::write("sectors.json", json_output).unwrap();
+    Ok(())
 }
 
 fn build_geo_polygons(
     rel: &osmpbfreader::Relation,
     objs: &BTreeMap<OsmId, OsmObj>,
-) -> (Area, MultiPolygon<f64>) {
+) -> MultiPolygon<f64> {
     // 1. Collect all "outer" ways as lists of NodeIds
     let mut unstitched_ways: Vec<Vec<NodeId>> = Vec::new();
 
     for ref_id in &rel.refs {
-        if ref_id.role == "outer" || ref_id.role == "" {
-            if let Some(OsmObj::Way(way)) = objs.get(&ref_id.member) {
-                if !way.nodes.is_empty() {
-                    unstitched_ways.push(way.nodes.clone());
-                }
-            }
+        if !(ref_id.role == "outer" || ref_id.role.is_empty()) {
+            continue;
         }
+
+        let Some(OsmObj::Way(way)) = objs.get(&ref_id.member) else {
+            continue;
+        };
+
+        if way.nodes.is_empty() {
+            continue;
+        }
+
+        unstitched_ways.push(way.nodes.clone());
     }
 
-    let mut areas = Vec::new();
     let mut polies = Vec::new();
 
     // 2. Loop until all disjointed rings (exclaves) are processed
@@ -340,11 +359,10 @@ fn build_geo_polygons(
         if !coords.is_empty() && coords.first() == coords.last() {
             let line_string = LineString::from(coords);
             polies.push(GeoPolygon::new(line_string, vec![]));
-            areas.push(vec![json_coords]);
         }
     }
 
-    (areas, MultiPolygon::new(polies))
+    MultiPolygon::new(polies)
 }
 
 fn name_en_to_id(name: &str) -> String {
@@ -354,7 +372,7 @@ fn name_en_to_id(name: &str) -> String {
             if matches!(sq.as_str(), "province" | "county" | "community") {
                 return None;
             }
-            return Some(sq);
+            Some(sq)
         })
         .collect::<Vec<_>>()
         .join("_")
@@ -364,10 +382,10 @@ fn name_en_to_id(name: &str) -> String {
 /// avoiding the "Concave Centroid" problem where curved states fall outside themselves.
 fn get_safe_interior_point(poly: &Polygon<f64>) -> Option<Point<f64>> {
     // 1. Try the centroid first (fastest, works for 90% of shapes)
-    if let Some(center) = poly.centroid() {
-        if poly.contains(&center) {
-            return Some(center);
-        }
+    if let Some(center) = poly.centroid()
+        && poly.contains(&center)
+    {
+        return Some(center);
     }
 
     // 2. If the centroid is outside (like North Khorasan), use a grid-search

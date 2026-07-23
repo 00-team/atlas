@@ -154,10 +154,10 @@ impl GeoIndex {
 #[derive(serde::Deserialize, Debug)]
 struct Eatery {
     gene: String,
-    name: String,
+    // name: String,
     latitude: f64,
     longitude: f64,
-    address: String,
+    // address: String,
 }
 
 fn main() {
