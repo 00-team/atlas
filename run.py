@@ -2,7 +2,7 @@ import json
 import math
 import random
 
-with open('sectors.json') as f:
+with open('sector-db.json') as f:
     DATA = json.load(f)
 
 
@@ -29,26 +29,56 @@ def simp(geom: list) -> list:
 
 C = []
 
-for cn in DATA.values():
-    if cn['level'] != 3:
-        continue
 
-    # if len(cn['area']) == 1:
-    #     continue
+def poly_to_geom(mp: list) -> list:
+    out = []
+    for p in mp:
+        poly = []
+        for ex in p['exterior']:
+            x, y = ex['x'], ex['y']
+            poly.append([x, y])
+        out.append([poly])
 
-    C.append({
+    return out
+
+
+N = []
+
+for n in DATA['nations'].values():
+    N.append({
         "type": "Feature",
         "properties": {
-                "name": cn['name'],
-                "id": cn['id'],
-                # "stroke": "#ff0"
-        },
+            "name": n['name'],
+            "id": n['id'],
+            "index": n['index'],
+            "stroke": "#ff0"
+            },
         "geometry": {
             "type": "MultiPolygon",
-            "coordinates": cn['area']
-
-        }
+            "coordinates": poly_to_geom(n['poly'])
+            }
     })
+
+for n in DATA['nations'].values():
+    print(n['name'], '|', n['id'])
+    for r in n['regions'].values():
+        print('   ', r['name'], '|', r['id'])
+        # for c in r['cantons'].values():
+        #     print('       ', c['name'], '|', c['id'])
+        x = r
+        C.append({
+                "type": "Feature",
+                "properties": {
+                    "name": x['name'],
+                    "id": x['id'],
+                    "index": x['index'],
+                    # "stroke": "#ff0"
+                },
+                "geometry": {
+                    "type": "MultiPolygon",
+                    "coordinates": poly_to_geom(x['poly'])
+                }
+            })
 
     # for s in cn['states']:
     #     sn = gn(s)
@@ -92,7 +122,7 @@ for cn in DATA.values():
 with open('geojson.json', 'w') as f:
     json.dump({
         "type": "FeatureCollection",
-        "features": C
+        "features": [*N, *C]
     }, f,
         indent=2,
         ensure_ascii=False

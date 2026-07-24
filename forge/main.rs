@@ -1,7 +1,7 @@
 use geo::algorithm::bounding_rect::BoundingRect;
 use geo::algorithm::centroid::Centroid;
 use geo::algorithm::contains::Contains;
-use geo::{HasDimensions, LineString, MultiPolygon, Polygon as GeoPolygon};
+use geo::{Area, HasDimensions, LineString, MultiPolygon, Polygon as GeoPolygon};
 use geo::{Point, Polygon};
 use osmpbfreader::NodeId;
 use osmpbfreader::{OsmId, OsmObj, OsmPbfReader};
@@ -29,6 +29,10 @@ mod error;
 
 const DB_PATH: &str = "sector-db.json";
 
+const NATION_LVL: &str = "2";
+const REGION_LVL: &str = "4";
+const CANTON_LVL: &str = "5";
+
 fn main() -> Result<(), AtlasError> {
     let filename = std::env::args().nth(1).expect("no filename");
     println!("loading: {filename}");
@@ -52,7 +56,7 @@ fn main() -> Result<(), AtlasError> {
             return false;
         };
 
-        admin_level == "2" || admin_level == "4" || admin_level == "5"
+        admin_level == NATION_LVL || admin_level == REGION_LVL || admin_level == CANTON_LVL
     })?;
 
     let mut nations = Vec::new();
@@ -61,6 +65,11 @@ fn main() -> Result<(), AtlasError> {
 
     let mut nations_ids = Vec::new();
     let mut regions_ids = Vec::new();
+
+    fn mpbb(mp: &MultiPolygon<f64>) -> rstar::AABB<[f64; 2]> {
+        let rect = mp.bounding_rect().unwrap();
+        rstar::AABB::from_corners([rect.min().x, rect.min().y], [rect.max().x, rect.max().y])
+    }
 
     for obj in objs.values() {
         let tags = obj.tags();
@@ -76,7 +85,7 @@ fn main() -> Result<(), AtlasError> {
             continue;
         };
 
-        if !["2", "4", "5"].contains(&admin_level) {
+        if ![NATION_LVL, REGION_LVL, CANTON_LVL].contains(&admin_level) {
             continue;
         }
 
@@ -99,10 +108,11 @@ fn main() -> Result<(), AtlasError> {
         }
 
         match admin_level {
-            "2" => {
+            NATION_LVL => {
                 nations_ids.push(id.clone());
                 nations.push(db::Nation {
                     name,
+                    bounding_box: mpbb(&poly),
                     poly,
                     id,
                     regions: Default::default(),
@@ -110,23 +120,28 @@ fn main() -> Result<(), AtlasError> {
                     regions_index: vec!["<empty>".to_string()],
                 });
             }
-            "4" => {
+            REGION_LVL => {
                 regions_ids.push(id.clone());
                 regions.push(db::Region {
                     name,
+                    bounding_box: mpbb(&poly),
                     poly,
                     id,
                     cantons: Default::default(),
                     index: 0,
                     canton_index: vec!["<empty>".to_string()],
+                    nation: String::new(),
                 });
             }
-            "5" => {
+            CANTON_LVL => {
                 cantons.push(db::Canton {
                     name,
+                    bounding_box: mpbb(&poly),
                     poly,
                     id,
                     index: 0,
+                    nation: String::new(),
+                    region: String::new(),
                 });
             }
             _ => unreachable!(),
@@ -146,19 +161,13 @@ fn main() -> Result<(), AtlasError> {
             cantons: Default::default(),
             id: n.id.clone(),
             name: n.name.clone(),
+            nation: n.id.clone(),
+            bounding_box: mpbb(&n.poly),
         };
         regions.push(r);
     }
 
     println!("Assembling hierarchy natively via Point-in-Polygon...");
-
-    fn clean_index<T>(index: &mut [String], map: &HashMap<String, T>) {
-        for id in index.iter_mut().skip(1) {
-            if !map.contains_key(id) {
-                id.clear();
-            }
-        }
-    }
 
     fn get_index(index: &mut Vec<String>, id: &str) -> usize {
         let mut empty_idx = 0;
@@ -178,19 +187,29 @@ fn main() -> Result<(), AtlasError> {
             return empty_idx;
         }
 
+        if index.is_empty() {
+            index.push("<empty>".to_string());
+        }
+
         let idx = index.len();
         index.push(id.to_string());
         idx
     }
 
-    clean_index(&mut sdb.index, &sdb.nations);
+    fn poly_cmp(a: &MultiPolygon<f64>, b: &MultiPolygon<f64>) -> bool {
+        a.unsigned_area() >= b.unsigned_area()
+    }
 
     for mut n in nations {
         assert!(!n.id.is_empty());
         if let Some(old) = sdb.nations.get_mut(&n.id) {
-            println!("nation {} already exists", n.name);
-            old.poly = n.poly;
-            old.regions.clear();
+            if !poly_cmp(&n.poly, &old.poly) {
+                println!("\x1b[33mnation\x1b[m {} already exists", n.name);
+            } else {
+                println!("\x1b[32mupdating nation\x1b[m {}", n.name);
+                old.poly = n.poly;
+                old.regions.clear();
+            }
             continue;
         }
 
@@ -205,22 +224,33 @@ fn main() -> Result<(), AtlasError> {
             continue;
         };
 
-        let Some(nation) = sdb.nations.values_mut().find(|n| n.poly.contains(&rc)) else {
+        let nation_id = nations_ids
+            .iter()
+            .find(|&id| sdb.nations[id].poly.contains(&rc));
+
+        let Some(nation_id) = nation_id else {
             println!(
-                "\x1b[93mWarning\x1b[m: State '{}' center fell completely outside all countries.",
+                "\x1b[93mWarning\x1b[m: Region '{}' center fell completely outside all Nations.",
                 r.name
             );
             continue;
         };
 
+        let nation = sdb.nations.get_mut(nation_id).unwrap();
+
         if let Some(old) = nation.regions.get_mut(&r.id) {
-            println!("region {} already exists", r.name);
-            old.poly = r.poly;
-            old.cantons.clear();
+            if !poly_cmp(&r.poly, &old.poly) {
+                println!("\x1b[33mregion\x1b[m {} already exists", r.name);
+            } else {
+                println!("\x1b[32mupdating region\x1b[m {}", r.name);
+                old.poly = r.poly;
+                old.cantons.clear();
+            }
             continue;
         }
 
         r.index = get_index(&mut nation.regions_index, &r.id);
+        r.nation = nation.id.clone();
         nation.regions.insert(r.id.clone(), r);
     }
 
@@ -231,26 +261,42 @@ fn main() -> Result<(), AtlasError> {
             continue;
         };
 
-        let region = sdb
-            .nations
-            .values_mut()
-            .find_map(|n| n.regions.values_mut().find(|r| r.poly.contains(&cc)));
+        let nid = nations_ids
+            .iter()
+            .find(|&id| sdb.nations[id].poly.contains(&cc));
+
+        let Some(nation_id) = nid else {
+            println!(
+                "\x1b[93mWarning\x1b[m: Canton '{}' center fell completely outside all Nations.",
+                c.name
+            );
+            continue;
+        };
+
+        let nation = sdb.nations.get_mut(nation_id).unwrap();
+        let region = nation.regions.values_mut().find(|r| r.poly.contains(&cc));
 
         let Some(region) = region else {
             println!(
-                "\x1b[93mWarning\x1b[m: County '{}' center fell completely outside all states.",
+                "\x1b[93mWarning\x1b[m: canton '{}' center fell completely outside all regions.",
                 c.name
             );
             continue;
         };
 
         if let Some(old) = region.cantons.get_mut(&c.id) {
-            println!("canton {} already exists", c.name);
-            old.poly = c.poly;
+            if !poly_cmp(&c.poly, &old.poly) {
+                println!("\x1b[33mcanton\x1b[m {} already exists", c.name);
+            } else {
+                println!("\x1b[32mupdating canton\x1b[m {}", c.name);
+                old.poly = c.poly;
+            }
             continue;
         }
 
         c.index = get_index(&mut region.canton_index, &c.id);
+        c.nation = region.nation.clone();
+        c.region = region.id.clone();
         region.cantons.insert(c.id.clone(), c);
     }
 
@@ -366,12 +412,15 @@ fn build_geo_polygons(
 }
 
 fn name_en_to_id(name: &str) -> String {
+    const IG: &[&str] = &["province", "county", "community", "governorate", "district"];
+
     name.split(' ')
         .filter_map(|sq| {
-            let sq = sq.to_lowercase();
-            if matches!(sq.as_str(), "province" | "county" | "community") {
+            let mut sq = sq.to_lowercase();
+            if IG.contains(&sq.as_str()) {
                 return None;
             }
+            sq = sq.replace('-', "_");
             Some(sq)
         })
         .collect::<Vec<_>>()

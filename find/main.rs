@@ -1,40 +1,73 @@
-use geo::{BoundingRect, Contains, LineString, MultiPolygon, Point, Polygon};
+use std::time::{Duration, Instant};
+
+use geo::{Contains, MultiPolygon, Point};
 use rstar::{AABB, RTree, RTreeObject};
 use rstar::{Envelope, PointDistance};
-use std::collections::HashMap;
 
-#[derive(Clone, Debug)]
+mod db;
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Sector {
-    pub geometry: MultiPolygon<f64>,
-    pub level: u8,
     pub name: String,
+    pub poly: MultiPolygon<f64>,
+    pub level: u8,
     pub id: String,
-    pub parent: String,
+    pub index: usize,
+    pub region: String,
+    pub nation: String,
     pub bounding_box: AABB<[f64; 2]>,
 }
 
-impl From<SectorData> for Sector {
-    fn from(value: SectorData) -> Self {
-        let mut polies = Vec::with_capacity(value.area.len());
-        for p in &value.area {
-            let ls = LineString::from(p[0].clone());
-            polies.push(Polygon::new(ls, vec![]));
-        }
-
-        let mp = MultiPolygon::new(polies);
-
-        let rect = mp.bounding_rect().unwrap();
-        let bounding_box =
-            AABB::from_corners([rect.min().x, rect.min().y], [rect.max().x, rect.max().y]);
-
+impl From<&db::Nation> for Sector {
+    fn from(value: &db::Nation) -> Self {
         Self {
-            geometry: mp,
-            bounding_box,
-            level: value.level,
-            parent: value.parent,
-            id: value.id,
-            name: value.name,
+            name: value.name.clone(),
+            poly: value.poly.clone(),
+            level: 1,
+            id: value.id.clone(),
+            index: value.index,
+            region: String::new(),
+            nation: String::new(),
+            bounding_box: value.bounding_box,
         }
+    }
+}
+
+impl From<&db::Region> for Sector {
+    fn from(value: &db::Region) -> Self {
+        Self {
+            name: value.name.clone(),
+            poly: value.poly.clone(),
+            level: 2,
+            id: value.id.clone(),
+            index: value.index,
+            region: String::new(),
+            nation: value.nation.clone(),
+            bounding_box: value.bounding_box,
+        }
+    }
+}
+
+impl From<&db::Canton> for Sector {
+    fn from(value: &db::Canton) -> Self {
+        Self {
+            name: value.name.clone(),
+            poly: value.poly.clone(),
+            level: 3,
+            id: value.id.clone(),
+            index: value.index,
+            region: value.region.clone(),
+            nation: value.nation.clone(),
+            bounding_box: value.bounding_box,
+        }
+    }
+}
+
+impl RTreeObject for Sector {
+    type Envelope = AABB<[f64; 2]>;
+
+    fn envelope(&self) -> Self::Envelope {
+        self.bounding_box
     }
 }
 
@@ -54,34 +87,7 @@ impl PointDistance for Sector {
 
         // Second, perform the exact ray-casting on the polygon (computationally heavy)
         let geo_point = Point::new(point[0], point[1]);
-        self.geometry.contains(&geo_point)
-    }
-}
-
-#[derive(serde::Deserialize, Clone)]
-struct SectorData {
-    level: u8,
-    name: String,
-    area: Vec<Vec<Vec<[f64; 2]>>>,
-    id: String,
-    parent: String,
-}
-
-// 2. Implement RTreeObject so rstar knows how to index it
-impl RTreeObject for Sector {
-    type Envelope = AABB<[f64; 2]>;
-
-    fn envelope(&self) -> Self::Envelope {
-        // Extract the bounding box of the MultiPolygon
-        let bounding_rect = self
-            .geometry
-            .bounding_rect()
-            .expect("Geometry must have a bounding rect");
-
-        AABB::from_corners(
-            [bounding_rect.min().x, bounding_rect.min().y],
-            [bounding_rect.max().x, bounding_rect.max().y],
-        )
+        self.poly.contains(&geo_point)
     }
 }
 
@@ -89,27 +95,31 @@ pub struct GeoIndex {
     cantons: RTree<Sector>,
     regions: RTree<Sector>,
     nations: RTree<Sector>,
+    sdb: db::SectorDb,
 }
 
 impl GeoIndex {
     pub fn load() -> Self {
-        let raw = std::fs::read_to_string("sectors.json").unwrap();
-        let sd = serde_json::from_str::<HashMap<String, SectorData>>(&raw).unwrap();
+        let sdb = db::SectorDb::load("sector-db.json").unwrap();
 
-        let mut cantons = Vec::<Sector>::with_capacity(sd.len());
-        let mut regions = Vec::<Sector>::with_capacity(sd.len());
-        let mut nations = Vec::<Sector>::with_capacity(sd.len());
+        let nc = sdb.nations.len();
 
-        for (_, s) in sd {
-            match s.level {
-                1 => nations.push(s.into()),
-                2 => regions.push(s.into()),
-                3 => cantons.push(s.into()),
-                _ => unreachable!(),
+        let mut nations = Vec::<Sector>::with_capacity(nc);
+        let mut regions = Vec::<Sector>::with_capacity(nc * 50);
+        let mut cantons = Vec::<Sector>::with_capacity(nc * 500);
+
+        for n in sdb.nations.values() {
+            nations.push(n.into());
+            for r in n.regions.values() {
+                regions.push(r.into());
+                for c in r.cantons.values() {
+                    cantons.push(c.into());
+                }
             }
         }
 
         Self {
+            sdb,
             nations: RTree::bulk_load(nations),
             regions: RTree::bulk_load(regions),
             cantons: RTree::bulk_load(cantons),
@@ -127,7 +137,7 @@ impl GeoIndex {
             let candidates = sectors.locate_all_at_point(point_coords);
 
             for candidate in candidates {
-                if candidate.geometry.contains(&search_point) {
+                if candidate.poly.contains(&search_point) {
                     return Some(candidate.clone());
                 }
             }
@@ -154,10 +164,10 @@ impl GeoIndex {
 #[derive(serde::Deserialize, Debug)]
 struct Eatery {
     gene: String,
-    // name: String,
+    name: String,
     latitude: f64,
     longitude: f64,
-    // address: String,
+    address: String,
 }
 
 fn main() {
@@ -166,15 +176,40 @@ fn main() {
     let eats = serde_json::from_str::<Vec<Eatery>>(&std::fs::read_to_string("eats.json").unwrap())
         .unwrap();
 
+    let mut count = 0;
+    let mut dur = Duration::default();
+    let mut found = 0;
+    let mut lv3 = 0;
+    let mut not_iran = 0;
+
     for eat in eats {
         if eat.longitude == 0.0 || eat.latitude == 0.0 {
             continue;
         }
 
+        let start = Instant::now();
         if let Some(s) = gix.find_location(eat.latitude, eat.longitude) {
-            println!("{} | {} | {}", s.level, eat.gene, s.id);
+            found += 1;
+            if s.level == 3 {
+                lv3 += 1;
+            }
+
+            if s.nation != "iran" {
+                println!("not iran: {} - {} - {}", s.nation, s.region, eat.gene);
+                not_iran += 1;
+            }
         } else {
             println!("\x1b[31mno sector\x1b[m for {eat:?}");
         }
+
+        dur += start.elapsed();
+        count += 1;
     }
+
+    println!(
+        "took: {:?} | {count} | {found} | {} | {} | {not_iran}",
+        dur / count,
+        count - found,
+        found - lv3
+    );
 }
