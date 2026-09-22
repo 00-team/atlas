@@ -44,18 +44,19 @@ pub struct SectorDb {
 
 impl SectorDb {
     pub fn load(path: &str) -> std::io::Result<Self> {
-        let raw = match std::fs::read_to_string(path) {
+        let raw = match std::fs::read(path) {
             Ok(v) => v,
             Err(e) => match e.kind() {
                 std::io::ErrorKind::NotFound => return Ok(Self::default()),
                 _ => return Err(e)?,
             },
         };
-        Ok(serde_json::from_str::<Self>(&raw)?)
+
+        Ok(serde_json::from_slice::<Self>(&raw)?)
     }
 
     pub fn save(&self, path: &str) -> std::io::Result<()> {
-        let jj = serde_json::to_string(self)?;
+        let jj = serde_json::to_vec(self)?;
         std::fs::write(path, jj)?;
         Ok(())
     }

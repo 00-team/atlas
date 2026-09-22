@@ -389,14 +389,14 @@ fn build_geo_polygons(
 
         // 3. Convert the stitched, continuous loop of NodeIds into coordinates
         let mut coords: Vec<(f64, f64)> = Vec::with_capacity(ring.len());
-        let mut json_coords: Vec<[f64; 2]> = Vec::with_capacity(ring.len());
+        // let mut json_coords: Vec<[f64; 2]> = Vec::with_capacity(ring.len());
 
         for node_id in ring {
             if let Some(OsmObj::Node(node)) = objs.get(&OsmId::Node(node_id)) {
                 let lon = node.decimicro_lon as f64 / 10_000_000.0;
                 let lat = node.decimicro_lat as f64 / 10_000_000.0;
                 coords.push((lon, lat));
-                json_coords.push([lon, lat]);
+                // json_coords.push([lon, lat]);
             }
         }
 

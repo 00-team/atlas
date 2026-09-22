@@ -1,5 +1,5 @@
 [workspace]
-members = ["forge", "find"]
+members = ["forge", "web"]
 resolver = "2"
 
 [workspace.package]
@@ -7,25 +7,9 @@ version = "0.1.0"
 edition = "2024"
 
 
-# [package]
-# name = "oss"
-# version = "0.1.0"
-# edition = "2024"
-#
-# [[bin]]
-# name = "find"
-# path = "src/find.rs"
-#
-# [[bin]]
-# name = "gem"
-# path = "src/gem.rs"
-
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 geo = { version = "0.33", features = ["serde"] }
 osmpbfreader = { version = "0.19", features = ["serde"] }
 rstar = { version = "0.13", features = ["serde"] }
-
-# geo = "0.27"
-# osmpbfreader = "0.17"
