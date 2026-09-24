@@ -243,12 +243,12 @@ fn main() -> Result<(), AtlasError> {
 
     let _ = std::fs::create_dir("landmarks");
     for (r, lms) in landmarks.iter() {
-        let lout = serde_json::to_vec_pretty(lms)?;
+        let lout = serde_json::to_vec(lms)?;
         std::fs::write(format!("landmarks/{r}.json"), lout)?;
     }
     std::fs::write(
-        format!("landmarks/simple-sector.json"),
-        serde_json::to_vec_pretty(&sdb.to_simple())?,
+        format!("landmarks/simple-sector-db.json"),
+        serde_json::to_vec(&sdb.to_simple())?,
     )?;
 
     Ok(())
