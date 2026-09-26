@@ -58,7 +58,7 @@ impl SectorDb {
         Ok(serde_json::from_slice::<Self>(&raw)?)
     }
 
-    pub fn to_simple(self) -> HashMap<String, SimpleNation> {
+    pub fn into_simple(self) -> HashMap<String, SimpleNation> {
         let mut out = HashMap::with_capacity(self.nations.len());
 
         for (nid, n) in self.nations {
