@@ -1,7 +1,9 @@
 use geo::algorithm::bounding_rect::BoundingRect;
 use geo::algorithm::centroid::Centroid;
 use geo::algorithm::contains::Contains;
-use geo::{Area, HasDimensions, LineString, MultiPolygon, Polygon as GeoPolygon};
+use geo::{
+    Area, HasDimensions, LineString, MultiPolygon, Polygon as GeoPolygon,
+};
 use geo::{Point, Polygon};
 use osmpbfreader::NodeId;
 use osmpbfreader::{OsmId, OsmObj, OsmPbfReader};
@@ -43,20 +45,25 @@ fn main() -> Result<(), AtlasError> {
     let file = File::open(&filename).expect("Failed to open PBF");
     let mut pbf = OsmPbfReader::new(file);
 
-    let en_locale =
-        serde_json::from_str::<HashMap<String, String>>(&std::fs::read_to_string("data/en.json")?)?;
+    let en_locale = serde_json::from_str::<HashMap<String, String>>(
+        &std::fs::read_to_string("data/en.json")?,
+    )?;
 
     let objs = pbf.get_objs_and_deps(|obj| {
         let tags = obj.tags();
-        let is_admin = tags.get("boundary").map(|s| s.as_str()) == Some("administrative");
+        let is_admin =
+            tags.get("boundary").map(|s| s.as_str()) == Some("administrative");
         if !is_admin {
             return false;
         }
-        let Some(admin_level) = tags.get("admin_level").map(|s| s.as_str()) else {
+        let Some(admin_level) = tags.get("admin_level").map(|s| s.as_str())
+        else {
             return false;
         };
 
-        admin_level == NATION_LVL || admin_level == REGION_LVL || admin_level == CANTON_LVL
+        admin_level == NATION_LVL
+            || admin_level == REGION_LVL
+            || admin_level == CANTON_LVL
     })?;
 
     let mut nations = Vec::new();
@@ -68,20 +75,25 @@ fn main() -> Result<(), AtlasError> {
 
     fn mpbb(mp: &MultiPolygon<f64>) -> rstar::AABB<[f64; 2]> {
         let rect = mp.bounding_rect().unwrap();
-        rstar::AABB::from_corners([rect.min().x, rect.min().y], [rect.max().x, rect.max().y])
+        rstar::AABB::from_corners(
+            [rect.min().x, rect.min().y],
+            [rect.max().x, rect.max().y],
+        )
     }
 
     for obj in objs.values() {
         let tags = obj.tags();
-        let name = tags.get("name").map(|s| s.to_string()).unwrap_or_default();
-        let name_en = tags
-            .get("name:en")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| en_locale.get(&name).cloned().unwrap_or_default());
+        let Some(name) = tags.get("name") else { continue };
+        let name = tools::text_normalize(name.as_str());
+        let name_en =
+            tags.get("name:en").map(|s| s.to_string()).unwrap_or_else(|| {
+                en_locale.get(&name).cloned().unwrap_or_default()
+            });
 
         let OsmObj::Relation(rel) = obj else { continue };
 
-        let Some(admin_level) = tags.get("admin_level").map(|s| s.as_str()) else {
+        let Some(admin_level) = tags.get("admin_level").map(|s| s.as_str())
+        else {
             continue;
         };
 
@@ -91,7 +103,9 @@ fn main() -> Result<(), AtlasError> {
 
         let poly = build_geo_polygons(rel, &objs);
         if poly.is_empty() {
-            println!("\x1b[33mwarning\x1b[m no geo for {admin_level:?} {name} | {name_en}");
+            println!(
+                "\x1b[33mwarning\x1b[m no geo for {admin_level:?} {name} | {name_en}"
+            );
             continue;
         }
 
@@ -224,9 +238,8 @@ fn main() -> Result<(), AtlasError> {
             continue;
         };
 
-        let nation_id = nations_ids
-            .iter()
-            .find(|&id| sdb.nations[id].poly.contains(&rc));
+        let nation_id =
+            nations_ids.iter().find(|&id| sdb.nations[id].poly.contains(&rc));
 
         let Some(nation_id) = nation_id else {
             println!(
@@ -261,9 +274,8 @@ fn main() -> Result<(), AtlasError> {
             continue;
         };
 
-        let nid = nations_ids
-            .iter()
-            .find(|&id| sdb.nations[id].poly.contains(&cc));
+        let nid =
+            nations_ids.iter().find(|&id| sdb.nations[id].poly.contains(&cc));
 
         let Some(nation_id) = nid else {
             println!(
@@ -306,8 +318,7 @@ fn main() -> Result<(), AtlasError> {
 }
 
 fn build_geo_polygons(
-    rel: &osmpbfreader::Relation,
-    objs: &BTreeMap<OsmId, OsmObj>,
+    rel: &osmpbfreader::Relation, objs: &BTreeMap<OsmId, OsmObj>,
 ) -> MultiPolygon<f64> {
     // 1. Collect all "outer" ways as lists of NodeIds
     let mut unstitched_ways: Vec<Vec<NodeId>> = Vec::new();
@@ -333,7 +344,8 @@ fn build_geo_polygons(
     // 2. Loop until all disjointed rings (exclaves) are processed
     while !unstitched_ways.is_empty() {
         // Seed the next disconnected ring
-        let mut ring: VecDeque<NodeId> = VecDeque::from(unstitched_ways.remove(0));
+        let mut ring: VecDeque<NodeId> =
+            VecDeque::from(unstitched_ways.remove(0));
         let mut changed = true;
 
         // Stitch the current ring together
@@ -412,7 +424,8 @@ fn build_geo_polygons(
 }
 
 fn name_en_to_id(name: &str) -> String {
-    const IG: &[&str] = &["province", "county", "community", "governorate", "district"];
+    const IG: &[&str] =
+        &["province", "county", "community", "governorate", "district"];
 
     name.split(' ')
         .filter_map(|sq| {
@@ -451,8 +464,10 @@ fn get_safe_interior_point(poly: &Polygon<f64>) -> Option<Point<f64>> {
         // Scan a 10x10 grid inside the bounding box
         for i in 1..steps {
             for j in 1..steps {
-                let test_point =
-                    Point::new(min_x + (i as f64 * step_x), min_y + (j as f64 * step_y));
+                let test_point = Point::new(
+                    min_x + (i as f64 * step_x),
+                    min_y + (j as f64 * step_y),
+                );
 
                 // Return the first point that falls strictly inside the actual polygon
                 if poly.contains(&test_point) {

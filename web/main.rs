@@ -55,7 +55,7 @@ fn main() -> Result<(), AtlasError> {
             landmarks.entry(region).or_insert(HashMap::with_capacity(20_000));
 
         let Some(v) = r.get_mut(&name) else {
-            r.insert(normalized(&name), vec![lm]);
+            r.insert(tools::text_normalize(&name), vec![lm]);
             return;
         };
 
@@ -248,7 +248,7 @@ fn main() -> Result<(), AtlasError> {
     }
     std::fs::write(
         "simple-sector-db.json",
-        serde_json::to_vec(&sdb.into_simple())?,
+        serde_json::to_vec_pretty(&sdb.into_simple())?,
     )?;
 
     Ok(())
@@ -271,26 +271,4 @@ fn get_max_parent(
             pa.0.priority().cmp(&pb.0.priority()).then_with(|| va.cmp(vb))
         })
         .map(|(a, _)| a.clone())
-}
-
-fn normalized(text: &str) -> String {
-    text.trim()
-        .chars()
-        .flat_map(|c| match c {
-            'ي' => Some('ی'),
-            'ك' => Some('ک'),
-            '۰' | '٠' => Some('0'),
-            '۱' | '١' => Some('1'),
-            '۲' | '٢' => Some('2'),
-            '۳' | '٣' => Some('3'),
-            '۴' | '٤' => Some('4'),
-            '۵' | '٥' => Some('5'),
-            '۶' | '٦' => Some('6'),
-            '۷' | '٧' => Some('7'),
-            '۸' | '٨' => Some('8'),
-            '۹' | '٩' => Some('9'),
-            '\u{064B}'..='\u{065F}' => None,
-            _ => Some(c),
-        })
-        .collect()
 }
