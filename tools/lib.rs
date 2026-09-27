@@ -20,5 +20,7 @@ pub fn text_normalize(text: &str) -> String {
             '\u{064B}'..='\u{065F}' => None,
             _ => Some(c),
         })
-        .collect()
+        .collect::<String>()
+        .trim()
+        .to_string()
 }

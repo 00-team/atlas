@@ -14,6 +14,7 @@ pub struct Canton {
     pub region: String,
     pub nation: String,
     pub bounding_box: AABB<[f64; 2]>,
+    pub center: Option<geo::Point>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -26,6 +27,7 @@ pub struct Region {
     pub canton_index: Vec<String>,
     pub nation: String,
     pub bounding_box: AABB<[f64; 2]>,
+    pub center: Option<geo::Point>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -37,6 +39,7 @@ pub struct Nation {
     pub regions: HashMap<String, Region>,
     pub regions_index: Vec<String>,
     pub bounding_box: AABB<[f64; 2]>,
+    pub center: Option<geo::Point>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -47,14 +50,7 @@ pub struct SectorDb {
 
 impl SectorDb {
     pub fn load(path: &str) -> std::io::Result<Self> {
-        let raw = match std::fs::read(path) {
-            Ok(v) => v,
-            Err(e) => match e.kind() {
-                std::io::ErrorKind::NotFound => return Ok(Self::default()),
-                _ => return Err(e)?,
-            },
-        };
-
+        let raw = std::fs::read(path)?;
         Ok(serde_json::from_slice::<Self>(&raw)?)
     }
 
@@ -74,6 +70,7 @@ impl SectorDb {
                             id: c.id,
                             nation: c.nation,
                             bounding_box: c.bounding_box.into(),
+                            center: c.center,
                         },
                     );
                 }
@@ -86,6 +83,7 @@ impl SectorDb {
                         id: r.id,
                         nation: r.nation,
                         bounding_box: r.bounding_box.into(),
+                        center: r.center,
                     },
                 );
             }
@@ -97,6 +95,7 @@ impl SectorDb {
                     regions,
                     id: n.id,
                     bounding_box: n.bounding_box.into(),
+                    center: n.center,
                 },
             );
         }
@@ -233,63 +232,79 @@ fn meters_to_degrees(meters: f64, latitude: f64) -> (f64, f64) {
     (lat, lon)
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize)]
 #[derive(Clone, Copy)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum Location {
-    Bbox(BoundingBox),
-    // Coordinate { lat: i32, lng: i32 },
-    Point(geo::Point),
+pub struct Location {
+    #[serde(skip_serializing_if = "BoundingBox::is_empty")]
+    pub bbox: BoundingBox,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center: Option<geo::Point>,
 }
 
 impl Location {
     pub fn is_close(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Point(ap), Self::Point(op)) => {
-                Haversine.distance(*ap, *op) < 1_000.0
+        if let Some(ac) = self.center {
+            if let Some(bc) = other.center {
+                return Haversine.distance(ac, bc) < 1_000.0;
             }
-            (Self::Bbox(ab), Self::Bbox(ob)) => ab.close_to(ob),
-            (Self::Point(p), Self::Bbox(b))
-            | (Self::Bbox(b), Self::Point(p)) => {
-                b.as_rect((0.0, 0.0)).contains(p)
-            }
+
+            return other.bbox.as_rect((0.0, 0.0)).contains(&ac);
         }
+
+        if self.bbox.is_empty() {
+            return false;
+        }
+
+        if let Some(bc) = other.center {
+            return self.bbox.as_rect((0.0, 0.0)).contains(&bc);
+        }
+
+        self.bbox.close_to(&other.bbox)
     }
 
     pub fn merge(&mut self, other: &Self) {
-        if let (Self::Point(_), Self::Bbox(_)) = (&self, other) {
-            self.clone_from(other);
-            return;
+        if self.bbox.is_empty() {
+            self.bbox = other.bbox;
+        } else if !other.bbox.is_empty() {
+            self.bbox.merge(&other.bbox);
         }
 
-        if let (Self::Bbox(ab), Self::Bbox(ob)) = (self, other) {
-            ab.merge(ob)
+        if self.center.is_none() {
+            self.center = other.center;
         }
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[derive(Hash, PartialEq, Eq, Clone)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "id")]
-pub enum LandmarkParent {
-    Nation(String),
-    Region(String),
-    Canton(String),
+#[serde(default)]
+pub struct LandmarkParent {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub nation: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub region: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub canton: String,
 }
 
-impl LandmarkParent {
-    pub fn priority(&self) -> i32 {
-        match self {
-            LandmarkParent::Canton(_) => 3,
-            LandmarkParent::Region(_) => 2,
-            LandmarkParent::Nation(_) => 1,
-        }
-    }
-}
+// impl LandmarkParent {
+//     pub fn priority(&self) -> i32 {
+//         if !self.canton.is_empty() {
+//             3
+//         } else if !self.region.is_empty() {
+//             2
+//         } else if !self.nation.is_empty() {
+//             1
+//         } else {
+//             0
+//         }
+//     }
+// }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Landmark {
+    #[serde(flatten)]
     pub loc: Location,
     pub kind: LandmarkKind,
     pub parent: LandmarkParent,

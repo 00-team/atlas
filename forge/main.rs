@@ -1,19 +1,14 @@
 use geo::algorithm::bounding_rect::BoundingRect;
-use geo::algorithm::centroid::Centroid;
 use geo::algorithm::contains::Contains;
-use geo::{
-    Area, HasDimensions, LineString, MultiPolygon, Polygon as GeoPolygon,
-};
-use geo::{Point, Polygon};
-use osmpbfreader::NodeId;
-use osmpbfreader::{OsmId, OsmObj, OsmPbfReader};
-use std::collections::VecDeque;
-use std::collections::{BTreeMap, HashMap};
+use geo::{Area, HasDimensions, MultiPolygon};
+use osmpbfreader::Tags;
+use osmpbfreader::{OsmObj, OsmPbfReader};
+use std::collections::HashMap;
 use std::fs::File;
 
 use crate::db::SectorDb;
 use crate::error::AtlasError;
-
+use crate::utils::rel_admin_centre;
 // #[derive(serde::Serialize, Clone)]
 // struct Sector {
 //     level: u8,
@@ -28,6 +23,7 @@ use crate::error::AtlasError;
 
 mod db;
 mod error;
+mod utils;
 
 const DB_PATH: &str = "sector-db.json";
 
@@ -49,21 +45,30 @@ fn main() -> Result<(), AtlasError> {
         &std::fs::read_to_string("data/en.json")?,
     )?;
 
+    fn get_admin_level(tags: &Tags) -> Option<&str> {
+        let bd = tags.get("boundary")?;
+        if bd != "administrative" {
+            return None;
+        }
+
+        let al = tags.get("admin_level")?.as_str();
+
+        if !matches!(al, NATION_LVL | REGION_LVL | CANTON_LVL) {
+            return None;
+        }
+
+        Some(al)
+    }
+
     let objs = pbf.get_objs_and_deps(|obj| {
         let tags = obj.tags();
-        let is_admin =
-            tags.get("boundary").map(|s| s.as_str()) == Some("administrative");
-        if !is_admin {
-            return false;
-        }
-        let Some(admin_level) = tags.get("admin_level").map(|s| s.as_str())
-        else {
-            return false;
-        };
 
-        admin_level == NATION_LVL
-            || admin_level == REGION_LVL
-            || admin_level == CANTON_LVL
+        let is_city = tags
+            .get("place")
+            .map(|s| matches!(s.as_str(), "city" | "town"))
+            .unwrap_or_default();
+
+        is_city || get_admin_level(tags).is_some()
     })?;
 
     let mut nations = Vec::new();
@@ -72,6 +77,8 @@ fn main() -> Result<(), AtlasError> {
 
     let mut nations_ids = Vec::new();
     let mut regions_ids = Vec::new();
+
+    let mut towns = HashMap::with_capacity(10_000);
 
     fn mpbb(mp: &MultiPolygon<f64>) -> rstar::AABB<[f64; 2]> {
         let rect = mp.bounding_rect().unwrap();
@@ -84,7 +91,32 @@ fn main() -> Result<(), AtlasError> {
     for obj in objs.values() {
         let tags = obj.tags();
         let Some(name) = tags.get("name") else { continue };
-        let name = tools::text_normalize(name.as_str());
+        let Some(place) = tags.get("place") else { continue };
+        if !matches!(place.as_str(), "city" | "town") {
+            continue;
+        }
+        let name = utils::clean_name(tools::text_normalize(name.as_str()));
+
+        let p = match obj {
+            OsmObj::Node(node) => {
+                let x = node.decimicro_lon as f64 / 1e7;
+                let y = node.decimicro_lat as f64 / 1e7;
+                geo::Point::new(x, y)
+            }
+            OsmObj::Relation(r) => {
+                let Some(p) = rel_admin_centre(r, &objs) else { continue };
+                p
+            }
+            _ => continue,
+        };
+
+        towns.insert(name, p);
+    }
+
+    for obj in objs.values() {
+        let tags = obj.tags();
+        let Some(name) = tags.get("name") else { continue };
+        let name = utils::clean_name(tools::text_normalize(name.as_str()));
         let name_en =
             tags.get("name:en").map(|s| s.to_string()).unwrap_or_else(|| {
                 en_locale.get(&name).cloned().unwrap_or_default()
@@ -101,7 +133,9 @@ fn main() -> Result<(), AtlasError> {
             continue;
         }
 
-        let poly = build_geo_polygons(rel, &objs);
+        let mut center = rel_admin_centre(rel, &objs);
+
+        let poly = utils::build_geo_polygons(rel, &objs);
         if poly.is_empty() {
             println!(
                 "\x1b[33mwarning\x1b[m no geo for {admin_level:?} {name} | {name_en}"
@@ -109,7 +143,15 @@ fn main() -> Result<(), AtlasError> {
             continue;
         }
 
-        let id = name_en_to_id(&name_en);
+        if center.is_none() {
+            center = towns.get(&name).cloned();
+        }
+
+        // if center.is_none() {
+        //     println!("\x1b[93mstill no center for\x1b[m {name}: {id:?}");
+        // }
+
+        let id = utils::name_en_to_id(&name_en);
 
         // let Some((geo_poly, coords)) = build_geo_polygons(rel, &objs) else {
         //     println!("\x1b[33mwarning\x1b[m no geo for {admin_level:?} {name} | {name_en}");
@@ -132,6 +174,7 @@ fn main() -> Result<(), AtlasError> {
                     regions: Default::default(),
                     index: 0,
                     regions_index: vec!["<empty>".to_string()],
+                    center,
                 });
             }
             REGION_LVL => {
@@ -145,6 +188,7 @@ fn main() -> Result<(), AtlasError> {
                     index: 0,
                     canton_index: vec!["<empty>".to_string()],
                     nation: String::new(),
+                    center,
                 });
             }
             CANTON_LVL => {
@@ -156,6 +200,7 @@ fn main() -> Result<(), AtlasError> {
                     index: 0,
                     nation: String::new(),
                     region: String::new(),
+                    center,
                 });
             }
             _ => unreachable!(),
@@ -177,6 +222,7 @@ fn main() -> Result<(), AtlasError> {
             name: n.name.clone(),
             nation: n.id.clone(),
             bounding_box: mpbb(&n.poly),
+            center: n.center,
         };
         regions.push(r);
     }
@@ -233,7 +279,7 @@ fn main() -> Result<(), AtlasError> {
 
     for mut r in regions {
         assert!(!r.id.is_empty());
-        let Some(rc) = get_safe_interior_point(&r.poly[0]) else {
+        let Some(rc) = utils::get_safe_interior_point(&r.poly[0]) else {
             println!("\x1b[31mERR: {}", r.name);
             continue;
         };
@@ -269,7 +315,7 @@ fn main() -> Result<(), AtlasError> {
 
     for mut c in cantons {
         assert!(!c.id.is_empty());
-        let Some(cc) = get_safe_interior_point(&c.poly[0]) else {
+        let Some(cc) = utils::get_safe_interior_point(&c.poly[0]) else {
             println!("\x1b[31mERR: {}", c.name);
             continue;
         };
@@ -315,168 +361,4 @@ fn main() -> Result<(), AtlasError> {
     sdb.save(DB_PATH)?;
 
     Ok(())
-}
-
-fn build_geo_polygons(
-    rel: &osmpbfreader::Relation, objs: &BTreeMap<OsmId, OsmObj>,
-) -> MultiPolygon<f64> {
-    // 1. Collect all "outer" ways as lists of NodeIds
-    let mut unstitched_ways: Vec<Vec<NodeId>> = Vec::new();
-
-    for ref_id in &rel.refs {
-        if !(ref_id.role == "outer" || ref_id.role.is_empty()) {
-            continue;
-        }
-
-        let Some(OsmObj::Way(way)) = objs.get(&ref_id.member) else {
-            continue;
-        };
-
-        if way.nodes.is_empty() {
-            continue;
-        }
-
-        unstitched_ways.push(way.nodes.clone());
-    }
-
-    let mut polies = Vec::new();
-
-    // 2. Loop until all disjointed rings (exclaves) are processed
-    while !unstitched_ways.is_empty() {
-        // Seed the next disconnected ring
-        let mut ring: VecDeque<NodeId> =
-            VecDeque::from(unstitched_ways.remove(0));
-        let mut changed = true;
-
-        // Stitch the current ring together
-        while changed && !unstitched_ways.is_empty() {
-            changed = false;
-            let first_node = *ring.front().unwrap();
-            let last_node = *ring.back().unwrap();
-
-            // If the ring is closed, we stop looking for connections for THIS ring
-            if first_node == last_node && ring.len() > 1 {
-                break;
-            }
-
-            // Search for a way that connects to either end of our current ring
-            let mut i = 0;
-            while i < unstitched_ways.len() {
-                let way = &unstitched_ways[i];
-                let way_first = *way.first().unwrap();
-                let way_last = *way.last().unwrap();
-
-                if way_first == last_node {
-                    // Connects to the end, facing forward
-                    ring.extend(way.iter().skip(1));
-                    unstitched_ways.remove(i);
-                    changed = true;
-                    break;
-                } else if way_last == last_node {
-                    // Connects to the end, facing backward (needs reversing)
-                    ring.extend(way.iter().rev().skip(1));
-                    unstitched_ways.remove(i);
-                    changed = true;
-                    break;
-                } else if way_last == first_node {
-                    // Connects to the start, facing forward
-                    for node in way.iter().rev().skip(1) {
-                        ring.push_front(*node);
-                    }
-                    unstitched_ways.remove(i);
-                    changed = true;
-                    break;
-                } else if way_first == first_node {
-                    // Connects to the start, facing backward (needs reversing)
-                    for node in way.iter().skip(1) {
-                        ring.push_front(*node);
-                    }
-                    unstitched_ways.remove(i);
-                    changed = true;
-                    break;
-                }
-                i += 1;
-            }
-        }
-
-        // 3. Convert the stitched, continuous loop of NodeIds into coordinates
-        let mut coords: Vec<(f64, f64)> = Vec::with_capacity(ring.len());
-        // let mut json_coords: Vec<[f64; 2]> = Vec::with_capacity(ring.len());
-
-        for node_id in ring {
-            if let Some(OsmObj::Node(node)) = objs.get(&OsmId::Node(node_id)) {
-                let lon = node.decimicro_lon as f64 / 10_000_000.0;
-                let lat = node.decimicro_lat as f64 / 10_000_000.0;
-                coords.push((lon, lat));
-                // json_coords.push([lon, lat]);
-            }
-        }
-
-        // 4. Ensure the loop is closed before building the geometry
-        // We only push valid, closed rings to our final output list.
-        if !coords.is_empty() && coords.first() == coords.last() {
-            let line_string = LineString::from(coords);
-            polies.push(GeoPolygon::new(line_string, vec![]));
-        }
-    }
-
-    MultiPolygon::new(polies)
-}
-
-fn name_en_to_id(name: &str) -> String {
-    const IG: &[&str] =
-        &["province", "county", "community", "governorate", "district"];
-
-    name.split(' ')
-        .filter_map(|sq| {
-            let mut sq = sq.to_lowercase();
-            if IG.contains(&sq.as_str()) {
-                return None;
-            }
-            sq = sq.replace('-', "_");
-            Some(sq)
-        })
-        .collect::<Vec<_>>()
-        .join("_")
-}
-
-/// Finds a point that is guaranteed to be strictly inside the polygon,
-/// avoiding the "Concave Centroid" problem where curved states fall outside themselves.
-fn get_safe_interior_point(poly: &Polygon<f64>) -> Option<Point<f64>> {
-    // 1. Try the centroid first (fastest, works for 90% of shapes)
-    if let Some(center) = poly.centroid()
-        && poly.contains(&center)
-    {
-        return Some(center);
-    }
-
-    // 2. If the centroid is outside (like North Khorasan), use a grid-search
-    if let Some(bbox) = poly.bounding_rect() {
-        let min_x = bbox.min().x;
-        let max_x = bbox.max().x;
-        let min_y = bbox.min().y;
-        let max_y = bbox.max().y;
-
-        let steps = 10;
-        let step_x = (max_x - min_x) / steps as f64;
-        let step_y = (max_y - min_y) / steps as f64;
-
-        // Scan a 10x10 grid inside the bounding box
-        for i in 1..steps {
-            for j in 1..steps {
-                let test_point = Point::new(
-                    min_x + (i as f64 * step_x),
-                    min_y + (j as f64 * step_y),
-                );
-
-                // Return the first point that falls strictly inside the actual polygon
-                if poly.contains(&test_point) {
-                    return Some(test_point);
-                }
-            }
-        }
-    }
-
-    // 3. Absolute fallback (should practically never hit this)
-    poly.centroid()
 }

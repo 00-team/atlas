@@ -1,4 +1,4 @@
-use geo::MultiPolygon;
+use geo::{MultiPolygon, Point};
 use rstar::AABB;
 use std::collections::HashMap;
 
@@ -11,6 +11,7 @@ pub struct Canton {
     pub region: String,
     pub nation: String,
     pub bounding_box: AABB<[f64; 2]>,
+    pub center: Option<Point>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -23,6 +24,7 @@ pub struct Region {
     pub canton_index: Vec<String>,
     pub nation: String,
     pub bounding_box: AABB<[f64; 2]>,
+    pub center: Option<Point>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -34,6 +36,7 @@ pub struct Nation {
     pub regions: HashMap<String, Region>,
     pub regions_index: Vec<String>,
     pub bounding_box: AABB<[f64; 2]>,
+    pub center: Option<Point>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]

@@ -22,7 +22,10 @@ impl From<&db::Nation> for Sector {
         Self {
             // name: value.name.clone(),
             poly: value.poly.clone(),
-            level: LandmarkParent::Nation(value.id.clone()),
+            level: LandmarkParent {
+                nation: value.id.clone(),
+                ..Default::default()
+            },
             // index: value.index,
             region: String::new(),
             // nation: String::new(),
@@ -36,7 +39,11 @@ impl From<&db::Region> for Sector {
         Self {
             // name: value.name.clone(),
             poly: value.poly.clone(),
-            level: LandmarkParent::Region(value.id.clone()),
+            level: LandmarkParent {
+                nation: value.nation.clone(),
+                region: value.id.clone(),
+                ..Default::default()
+            },
             // index: value.index,
             region: value.id.clone(),
             // nation: value.nation.clone(),
@@ -50,7 +57,11 @@ impl From<&db::Canton> for Sector {
         Self {
             // name: value.name.clone(),
             poly: value.poly.clone(),
-            level: LandmarkParent::Canton(value.id.clone()),
+            level: LandmarkParent {
+                nation: value.nation.clone(),
+                region: value.region.clone(),
+                canton: value.id.clone(),
+            },
             // index: value.index,
             region: value.region.clone(),
             // nation: value.nation.clone(),

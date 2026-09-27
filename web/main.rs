@@ -2,17 +2,17 @@ use osmpbfreader::{Node, OsmId, OsmObj, OsmPbfReader, Tags};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 
-use crate::db::{
-    BoundingBox, Landmark, LandmarkKind, LandmarkParent, Location,
-};
+use crate::db::{BoundingBox, Landmark, LandmarkKind, Location};
 use crate::error::AtlasError;
+use crate::polylabel::polylabel;
 
 mod db;
 mod error;
 mod find;
+mod polylabel;
 mod sector;
 
-const SDB_PATH: &str = "sector-db.fmt.json";
+const SDB_PATH: &str = "sector-db.json";
 // const LANDMARKS_PATH: &str = "landmarks.json";
 
 fn main() -> Result<(), AtlasError> {
@@ -50,9 +50,15 @@ fn main() -> Result<(), AtlasError> {
     let mut landmarks =
         HashMap::<String, HashMap<String, Vec<Landmark>>>::with_capacity(300);
 
-    let mut add_lm = |name: String, region: String, lm: Landmark| {
-        let r =
-            landmarks.entry(region).or_insert(HashMap::with_capacity(20_000));
+    let mut add_lm = |name: String, lm: Landmark| {
+        let rg = &lm.parent.region;
+        if rg.is_empty() {
+            println!("empty region");
+            return;
+        }
+        let r = landmarks
+            .entry(rg.clone())
+            .or_insert(HashMap::with_capacity(20_000));
 
         let Some(v) = r.get_mut(&name) else {
             r.insert(tools::text_normalize(&name), vec![lm]);
@@ -95,26 +101,28 @@ fn main() -> Result<(), AtlasError> {
             continue;
         };
 
-        let mut center = None;
-        let mut bbox = BoundingBox::default();
-
-        let mut pf = HashMap::with_capacity(10);
+        let mut loc = Location::default();
+        // let mut pf = HashMap::with_capacity(10);
+        let mut poly = Vec::with_capacity(200);
+        // let mut polygon = geo::Polygon::<f64>::new(geo::LineString::new(vec![]), vec![]);
 
         let mut bn = |n: &Node| {
             let lat = n.decimicro_lat as f64 / 1e7;
             let lng = n.decimicro_lon as f64 / 1e7;
 
-            let Some(pp) = lat_lng_to_sector(lat, lng, &gdx) else { return };
-            *pf.entry(pp).or_insert(0) += 1;
+            // let Some(pp) = lat_lng_to_sector(lat, lng, &gdx) else { return };
+            // *pf.entry(pp).or_insert(0) += 1;
 
-            bbox.update(lat, lng);
+            poly.push((lng, lat));
+
+            loc.bbox.update(lat, lng);
         };
 
         for rf in r.refs.iter() {
             seen_ids.insert(rf.member);
 
             if matches!(rf.role.as_str(), "admin_centre" | "label")
-                && center.is_none()
+                && loc.center.is_none()
             {
                 let Some(OsmObj::Node(n)) = objs.get(&rf.member) else {
                     continue;
@@ -123,7 +131,7 @@ fn main() -> Result<(), AtlasError> {
                 let x = n.decimicro_lon as f64 / 1e7;
                 let y = n.decimicro_lat as f64 / 1e7;
 
-                center = Some(Location::Point(geo::Point::new(x, y)));
+                loc.center = Some(geo::Point::new(x, y));
 
                 continue;
             }
@@ -148,22 +156,33 @@ fn main() -> Result<(), AtlasError> {
             }
         }
 
-        let (loc, parent, region) = if !bbox.is_empty() {
-            stats.bbox += 1;
-            let Some((parent, region)) = get_max_parent(&pf) else { continue };
-            (Location::Bbox(bbox), parent, region)
-        } else if let Some(Location::Point(p)) = center {
-            stats.coord += 1;
-            let Some((p, r)) = lat_lng_to_sector(p.y(), p.x(), &gdx) else {
+        let parent = if let Some(p) = loc.center {
+            let Some(s) = gdx.find_location(p.y(), p.x()) else {
                 continue;
             };
-            (center.unwrap(), p, r)
+            s.level
         } else {
-            continue;
+            let poly = geo::Polygon::new(poly.into(), vec![]);
+            let p = polylabel(&poly, 0.1).unwrap();
+            let Some(s) = gdx.find_location(p.y(), p.x()) else {
+                continue;
+            };
+            s.level
         };
 
+        // let (loc, parent, region) = if !bbox.is_empty() {
+        //     stats.bbox += 1;
+        //     let Some((parent, region)) = get_max_parent(&pf) else { continue };
+        //     (Location::Bbox(bbox), parent, region)
+        // } else if let Some(Location::Point(p)) = center {
+        //     stats.coord += 1;
+        //     (center.unwrap(), p, r)
+        // } else {
+        //     continue;
+        // };
+
         kind.add_stats(&mut stats);
-        add_lm(name, region, Landmark { loc, kind, parent })
+        add_lm(name, Landmark { loc, kind, parent })
     }
 
     for (id, obj) in objs.iter() {
@@ -185,15 +204,16 @@ fn main() -> Result<(), AtlasError> {
                 let x = n.decimicro_lon as f64 / 1e7;
                 let y = n.decimicro_lat as f64 / 1e7;
 
-                let loc = Location::Point(geo::Point::new(x, y));
+                let loc = Location {
+                    center: Some(geo::Point::new(x, y)),
+                    bbox: BoundingBox::default(),
+                };
 
                 kind.add_stats(&mut stats);
 
                 stats.coord += 1;
-                let Some((parent, rg)) = lat_lng_to_sector(y, x, &gdx) else {
-                    continue;
-                };
-                add_lm(name, rg, Landmark { loc, kind, parent });
+                let Some(s) = gdx.find_location(y, x) else { continue };
+                add_lm(name, Landmark { loc, kind, parent: s.level });
             }
             OsmObj::Way(w) => {
                 let Some(kind) = LandmarkKind::from_tags("highway", tags)
@@ -202,30 +222,33 @@ fn main() -> Result<(), AtlasError> {
                 };
 
                 let mut bbox = BoundingBox::default();
-
-                let mut pf = HashMap::with_capacity(10);
+                let mut poly = Vec::with_capacity(200);
+                // let mut pf = HashMap::with_capacity(10);
 
                 for &nid in w.nodes.iter() {
                     if let Some(OsmObj::Node(n)) = objs.get(&OsmId::Node(nid)) {
                         let lng = n.decimicro_lon as f64 / 1e7;
                         let lat = n.decimicro_lat as f64 / 1e7;
 
-                        let Some(p) = lat_lng_to_sector(lat, lng, &gdx) else {
-                            continue;
-                        };
-                        *pf.entry(p).or_insert(0) += 1;
+                        poly.push((lng, lat));
+                        // let Some(p) = lat_lng_to_sector(lat, lng, &gdx) else {
+                        //     continue;
+                        // };
+                        // *pf.entry(p).or_insert(0) += 1;
 
                         bbox.update(lat, lng);
                     }
                 }
 
-                let Some((parent, rg)) = get_max_parent(&pf) else { continue };
+                let poly = geo::Polygon::new(poly.into(), vec![]);
+                let Ok(p) = polylabel(&poly, 0.1) else { continue };
+                let Some(s) = gdx.find_location(p.y(), p.x()) else { continue };
 
                 stats.bbox += 1;
-                let loc = Location::Bbox(bbox);
+                let loc = Location { bbox, center: None };
 
                 kind.add_stats(&mut stats);
-                add_lm(name, rg, Landmark { loc, kind, parent });
+                add_lm(name, Landmark { loc, kind, parent: s.level });
             }
             _ => {}
         }
@@ -254,21 +277,12 @@ fn main() -> Result<(), AtlasError> {
     Ok(())
 }
 
-fn lat_lng_to_sector(
-    lat: f64, lng: f64, gdx: &find::GeoIndex,
-) -> Option<(LandmarkParent, String)> {
-    // let (lat, lng) = (lat as f64 / 1e7, lng as f64 / 1e7);
-
-    let sector = gdx.find_location(lat, lng)?;
-    Some((sector.level, sector.region))
-}
-
-fn get_max_parent(
-    map: &HashMap<(LandmarkParent, String), i32>,
-) -> Option<(LandmarkParent, String)> {
-    map.iter()
-        .max_by(|(pa, va), (pb, vb)| {
-            pa.0.priority().cmp(&pb.0.priority()).then_with(|| va.cmp(vb))
-        })
-        .map(|(a, _)| a.clone())
-}
+// fn get_max_parent(
+//     map: &HashMap<(LandmarkParent, String), i32>,
+// ) -> Option<(LandmarkParent, String)> {
+//     map.iter()
+//         .max_by(|(pa, va), (pb, vb)| {
+//             pa.0.priority().cmp(&pb.0.priority()).then_with(|| va.cmp(vb))
+//         })
+//         .map(|(a, _)| a.clone())
+// }

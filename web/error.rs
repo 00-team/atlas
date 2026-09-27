@@ -5,6 +5,9 @@ pub enum AtlasError {
     Io(std::io::Error),
     Osm(osmpbfreader::Error),
     IdAlreadyExists,
+    InvalidTolerance,
+    CentroidCalculation,
+    RectCalculation,
 }
 
 impl From<std::io::Error> for AtlasError {
