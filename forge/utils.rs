@@ -144,7 +144,7 @@ pub fn name_en_to_id(name: &str) -> String {
             if IG.contains(&sq.as_str()) {
                 return None;
             }
-            sq = sq.replace('-', "_");
+            sq = sq.replace('-', "_").replace('\'', "_");
             Some(sq)
         })
         .collect::<Vec<_>>()
